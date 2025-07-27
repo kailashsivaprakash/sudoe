@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ESP32 BLE Control</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      padding: 30px;
+      background: #f4f4f4;
+    }
+    h2 {
+      margin-bottom: 10px;
+    }
+    #status {
+      margin: 15px 0;
+      font-weight: bold;
+      color: #d32f2f;
+    }
+    .btn {
+      position: relative;
+      padding: 20px;
+      font-size: 18px;
+      margin: 12px auto;
+      width: 240px;
+      display: block;
+      border: none;
+      border-radius: 10px;
+      color: white;
+      cursor: pointer;
+      transition: background-color 0.3s;
+      user-select: none;
+      text-align: left;
+      padding-right: 50px;
+    }
+    .on {
+      background-color: #4caf50;
+    }
+    .off {
+      background-color: #757575;
+    }
+    .btn:hover {
+      opacity: 0.85;
+    }
+    #ble-controls .btn {
+      background-color: #2196f3;
+    }
+    #ble-controls .btn:hover {
+      background-color: #1976d2;
+    }
+    .delete-icon {
+      position: absolute;
+      right: 15px;
+      top: 50%;
+      transform: translateY(-50%);
+      font-size: 18px;
+      color: red;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+<h2>ESP32 BLE Control Panel</h2>
+<div id="status">BLE State: DISCONNECTED</div>
+
+<div id="ble-controls">
+  <button class="btn" onclick="connectBLE()">🔌 Connect to ESP32</button>
+  <button class="btn" onclick="disconnectBLE()">❌ Disconnect</button>
+</div>
+
+<hr>
+
+<div id="buttonsContainer"></div>
+
+<button class="btn" style="background-color:#009688;" onclick="addNewButton()">➕ Add New Button</button>
+
+<script>
+  let bleDevice, bleServer, controlChar;
+  const SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';
+  const CONTROL_UUID = '19b10002-e8f2-537e-4f6c-d104768a1214';
+  const STATUS_UUID = '19b10003-e8f2-537e-4f6c-d104768a1214';
+  let statusChar;
+
+  const statusDiv = document.getElementById("status");
+  const container = document.getElementById("buttonsContainer");
+
+  const defaultButtons = [
+    { name: "Relay 1", gpio: "14", fixed: true },
+    { name: "Relay 2", gpio: "13", fixed: true },
+    { name: "Power Saving Mode", gpio: "999", fixed: true }
+  ];
+
+  let buttons = JSON.parse(localStorage.getItem("buttons")) || defaultButtons;
+
+  function updateStatus(connected) {
+    statusDiv.textContent = connected ? "BLE State: CONNECTED" : "BLE State: DISCONNECTED";
+    statusDiv.style.color = connected ? "green" : "#d32f2f";
+  }
+
+  async function connectBLE() {
+    try {
+      bleDevice = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+      bleServer = await bleDevice.gatt.connect();
+      const service = await bleServer.getPrimaryService(SERVICE_UUID);
+
+      controlChar = await service.getCharacteristic(CONTROL_UUID);
+      statusChar = await service.getCharacteristic(STATUS_UUID);
+      await statusChar.startNotifications();
+      statusChar.addEventListener("characteristicvaluechanged", handleStatusUpdate);
+
+      updateStatus(true);
+      alert("✅ Connected to ESP32 BLE");
+    } catch (err) {
+      alert("❌ BLE Connection Failed: " + err);
+    }
+  }
+
+  function disconnectBLE() {
+    if (bleDevice && bleDevice.gatt.connected) {
+      bleDevice.gatt.disconnect();
+      updateStatus(false);
+    }
+  }
+
+  async function sendCommand(value) {
+    if (!controlChar) {
+      alert("❗ BLE not connected");
+      return;
+    }
+    const encoder = new TextEncoder();
+    await controlChar.writeValue(encoder.encode(value));
+  }
+
+  function saveButtons() {
+    localStorage.setItem("buttons", JSON.stringify(buttons));
+  }
+
+  function renderButtons() {
+    container.innerHTML = "";
+    buttons.forEach((btn, index) => {
+      const button = document.createElement("button");
+      button.className = "btn off";
+      button.innerText = btn.name;
+      button.addEventListener("click", () => {
+        sendCommand(btn.gpio);
+      });
+
+      if (!btn.fixed) {
+        let pressTimer;
+        button.addEventListener("touchstart", () => {
+          pressTimer = setTimeout(() => {
+            const newName = prompt("Rename button:", btn.name);
+            if (newName) {
+              buttons[index].name = newName;
+              saveButtons();
+              renderButtons();
+            }
+          }, 600);
+        });
+        button.addEventListener("touchend", () => clearTimeout(pressTimer));
+      }
+
+      if (!btn.fixed) {
+        const del = document.createElement("span");
+        del.className = "delete-icon";
+        del.innerText = "🗑️";
+        del.onclick = (e) => {
+          e.stopPropagation();
+          if (confirm("Delete this button?")) {
+            buttons.splice(index, 1);
+            saveButtons();
+            renderButtons();
+          }
+        };
+        button.appendChild(del);
+      }
+
+      container.appendChild(button);
+    });
+  }
+
+  function addNewButton() {
+    const label = prompt("Enter button label:");
+    if (!label) return;
+
+    const gpio = prompt("Enter GPIO number (0–39):");
+    if (gpio === null || gpio.trim() === "") return;
+
+    const num = parseInt(gpio);
+    if (isNaN(num) || num < 0 || num > 39) {
+      alert("⚠️ Invalid GPIO number");
+      return;
+    }
+
+    buttons.push({ name: label, gpio: gpio });
+    saveButtons();
+    renderButtons();
+  }
+
+  function handleStatusUpdate(event) {
+    const value = new TextDecoder().decode(event.target.value);
+    const status = parseStatusString(value);
+    updateButtonVisuals(status);
+  }
+
+  function parseStatusString(str) {
+    const result = {};
+    str.split(',').forEach(part => {
+      const [key, val] = part.split(':');
+      result[key] = parseInt(val);
+    });
+    return result;
+  }
+
+  function updateButtonVisuals(status) {
+    buttons.forEach((btn, index) => {
+      const el = container.children[index];
+      if (!el) return;
+
+      let gpio = parseInt(btn.gpio);
+      let isOn = false;
+
+      if (gpio === 13) isOn = status["R1"];
+      else if (gpio === 14) isOn = status["R2"];
+      else if (gpio === 999) isOn = status["P"];
+      else isOn = status["G" + gpio]; // ✅ Custom GPIO status key (e.g., G16:1)
+
+      el.classList.remove("on", "off");
+      el.classList.add(isOn ? "on" : "off");
+    });
+  }
+
+  renderButtons();
+</script>
+</body>
+</html>
